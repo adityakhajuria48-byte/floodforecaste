@@ -1,0 +1,162 @@
+version: '3.8'
+
+services:
+  # PostgreSQL with PostGIS
+  postgres:
+    image: postgis/postgis:15-3.3
+    container_name: flood-postgres
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-flood_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change_this_password}
+      POSTGRES_DB: ${POSTGRES_DB:-flood_prediction}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./backend/app/models/sql:/docker-entrypoint-initdb.d
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-flood_user} -d ${POSTGRES_DB:-flood_prediction}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - flood-network
+
+  # Redis for Celery broker
+  redis:
+    image: redis:7-alpine
+    container_name: flood-redis
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - flood-network
+
+  # Backend API
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: flood-backend
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-flood_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-change_this_password}
+      - POSTGRES_DB=${POSTGRES_DB:-flood_prediction}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - COPEERNICUS_USERNAME=${COPEERNICUS_USERNAME}
+      - COPEERNICUS_PASSWORD=${COPEERNICUS_PASSWORD}
+      - SENTINEL_HUB_CLIENT_ID=${SENTINEL_HUB_CLIENT_ID}
+      - SENTINEL_HUB_CLIENT_SECRET=${SENTINEL_HUB_CLIENT_SECRET}
+      - NASA_EARTHDATA_USERNAME=${NASA_EARTHDATA_USERNAME}
+      - NASA_EARTHDATA_PASSWORD=${NASA_EARTHDATA_PASSWORD}
+      - OPENWEATHERMAP_API_KEY=${OPENWEATHERMAP_API_KEY}
+      - SECRET_KEY=${SECRET_KEY:-dev-secret-key-change-in-production}
+      - DEBUG=${DEBUG:-true}
+      - APP_ENV=${APP_ENV:-development}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - DATA_DIR=/app/data
+      - MAX_AOI_SIZE_KM2=${MAX_AOI_SIZE_KM2:-100}
+      - DEFAULT_BACKSCATTER_THRESHOLD=${DEFAULT_BACKSCATTER_THRESHOLD:--20}
+      - DEFAULT_NDWI_THRESHOLD=${DEFAULT_NDWI_THRESHOLD:-0.3}
+      - DEFAULT_MNDWI_THRESHOLD=${DEFAULT_MNDWI_THRESHOLD:-0.0}
+    volumes:
+      - ./backend/app:/app/app
+      - ./data:/app/data
+      - ./logs:/app/logs
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: >
+      sh -c "cd /app && 
+             pip install -e . &&
+             uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    networks:
+      - flood-network
+
+  # Celery Worker
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: flood-worker
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-flood_user}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-change_this_password}
+      - POSTGRES_DB=${POSTGRES_DB:-flood_prediction}
+      - POSTGRES_HOST=postgres
+      - POSTGRES_PORT=5432
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_DB=0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - COPEERNICUS_USERNAME=${COPEERNICUS_USERNAME}
+      - COPEERNICUS_PASSWORD=${COPEERNICUS_PASSWORD}
+      - SENTINEL_HUB_CLIENT_ID=${SENTINEL_HUB_CLIENT_ID}
+      - SENTINEL_HUB_CLIENT_SECRET=${SENTINEL_HUB_CLIENT_SECRET}
+      - NASA_EARTHDATA_USERNAME=${NASA_EARTHDATA_USERNAME}
+      - NASA_EARTHDATA_PASSWORD=${NASA_EARTHDATA_PASSWORD}
+      - OPENWEATHERMAP_API_KEY=${OPENWEATHERMAP_API_KEY}
+      - SECRET_KEY=${SECRET_KEY:-dev-secret-key-change-in-production}
+      - DEBUG=${DEBUG:-true}
+      - APP_ENV=${APP_ENV:-development}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - DATA_DIR=/app/data
+    volumes:
+      - ./backend/app:/app/app
+      - ./data:/app/data
+      - ./logs:/app/logs
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: >
+      sh -c "cd /app && 
+             pip install -e . &&
+             celery -A app.core.celery_app worker --loglevel=info --concurrency=2"
+    networks:
+      - flood-network
+
+  # Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        - VITE_API_URL=http://localhost:8000/api
+    container_name: flood-frontend
+    environment:
+      - VITE_API_URL=http://localhost:8000/api
+    volumes:
+      - ./frontend/src:/app/src
+      - ./frontend/public:/app/public
+    ports:
+      - "3000:5173"
+    depends_on:
+      - backend
+    command: npm run dev -- --host 0.0.0.0
+    networks:
+      - flood-network
+
+networks:
+  flood-network:
+    driver: bridge
+
+volumes:
+  postgres_data:
+    driver: local
